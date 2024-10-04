@@ -1,8 +1,9 @@
 import ast
 import pandas as pd
 import re
+import logging
 from sklearn.preprocessing import MultiLabelBinarizer, MinMaxScaler
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.neighbors import NearestNeighbors
 
 def extracting_data(data):
     # using the re library to separate the rating and the amound of users rated
@@ -13,69 +14,97 @@ def extracting_data(data):
         num_ratings = int(match.group(3))
         return rating, num_ratings
     else:
-        print(f"Warning: could not parse rating: {data}")  # Debugging message
+        logging.warning(f"Could not parse rating: {data}")  # Debugging message
         return None, None
 
-def get_recommendations(title, cosine_sim, df, top_n=5):
+def get_recommendations(title, combined_features, df, top_n=5):
+
     # Indexing the title to figure where in the df the user inputted title is
-    idx = df.index[df['Title'] == title].tolist()[0]
+    try:
+        idx = df.index[df['Title'] == title].tolist()[0]
+    except IndexError:
+        logging.error(f"Book title '{title}' not found in the dataset.")
+        return []
+
+    distances, indices = nn_model.kneighbors([combined_features.iloc[idx]], n_neighbors=top_n+1)
+
+    similar_indices = indices.flatten()[1:]  # Skip the first as it's the same book
+    similar_distances = distances.flatten()[1:] # Skip the first distance
+
+    # Edge case: handle if there are less than top_n books
+    if len(similar_indices) < top_n:
+        logging.warning(f"Only found {len(similar_indices)} recommendations for '{title}'.")
+
+    # Return the titles of the top N most similar books
+    recommendations_with_scores = [
+        {'title': df['Title'].iloc[i], 'score': 1 - similar_distances[idx]}  # 1 - distance gives similarity score
+        for idx, i in enumerate(similar_indices)
+    ]
     
-    # Get similarity scores for all books with that book
-    sim_scores = list(enumerate(cosine_sim[idx]))
+    return recommendations_with_scores
 
-    # Sorting the books based on similarity score
-    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+def load_and_preprocess_data(file_path):
 
-    # Getting the top 5 recommendations
-    sim_scores = sim_scores[1:top_n+1]
+    # Loading the csv file
+    try:
+        df = pd.read_csv(file_path)
+        logging.info('CSV file loading successful.')
+    except FileNotFoundError:
+        logging.error('Error: File not found. Please check File path or name.')
+        raise
 
-    # Getting the titles of the books
-    book_indices = [i[0] for i in sim_scores]
+    # Adjust Genre column to be a list of lists instead of strings
+    df['Genre'] = df['Genre'].apply(ast.literal_eval)
 
-    #print(sim_scores)
+    # Extract rating values and number of ratings
+    df['Rating_Value'], df['Num_Ratings'] = zip(*df['Rating'].apply(extracting_data))
 
-    return df['Title'].iloc[book_indices]
+    # Handle missing or invalid ratings by filling NaN values
+    df['Rating_Value'].fillna(0, inplace=True)
+    df['Num_Ratings'].fillna(0, inplace=True)
 
-df = pd.read_csv('novels.csv')
+    return df
 
-titles = df['Title'].tolist()
-status = df['Status'].tolist()
+def prepare_features(df):
+    # Preparing for genre rating features for model training
+    genre = df['Genre'].tolist()
 
-# Adjusting data of Genre to be a list of lists instead of a string
+    # One-hot encode the genre column
+    mlb = MultiLabelBinarizer()
+    genre_mat = mlb.fit_transform(genre)
+    genre_df = pd.DataFrame(genre_mat, columns=mlb.classes_)
 
-df['Genre'] = df['Genre'].apply(ast.literal_eval)
-genre = df['Genre'].tolist()
+    # Concatenate the one-hot encoded genre columns to the original dataframe
+    df = pd.concat([df, genre_df], axis=1)
 
-# Separating the count of users that rated the particular book and rating
+    # Normalize the Rating_Value column
+    scaler = MinMaxScaler()
+    df['Rating_Value_scaled'] = scaler.fit_transform(df[['Rating_Value']])
 
-df['Rating_Value'], df['Num_Ratings'] = zip(*df['Rating'].apply(extracting_data))
-ratings = df['Rating_Value'].tolist()
-num_ratings = df['Num_Ratings'].tolist()
+    # Combine genre and rating features for similarity calculations
+    combined_features = pd.concat([genre_df, df[['Rating_Value_scaled']]], axis=1)
 
-
-# One-hot Encoding the genres list
-
-mlb = MultiLabelBinarizer()
-genre_mat = mlb.fit_transform(genre)
-genre_df = pd.DataFrame(genre_mat, columns=mlb.classes_)
-
-# Adding the new one-hot encoded genre list to original dataframe
-df = pd.concat([df, genre_df], axis=1)
-
-# Normalizing the ratings into the model
-scaler = MinMaxScaler()
-df['Rating_Value_scaled'] = scaler.fit_transform(df[['Rating_Value']])
-
-# Combine the genre and rating features
-combined_features = pd.concat([genre_df, df['Rating_Value_scaled']], axis=1)
-
-# Calculate cosine similarity on the combined features
-combined_cosine_sim = cosine_similarity(combined_features)
-book = 'Lord of the Mysteries (Web Novel)'
-recommendations = get_recommendations(book, combined_cosine_sim, df)
+    return combined_features
 
 
-print(f'Based on the book you just read {book}. We recommend these 5 books:')
-for i in recommendations:
-    print(i)
-    print('\n')
+# Preparing logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Load and preprocess the data
+df = load_and_preprocess_data('novels.csv')
+
+# Prepare combined features for recommendation
+combined_features = prepare_features(df)
+
+# Initialize the Nearest Neighbors model for cosine similarity
+nn_model = NearestNeighbors(metric='cosine', algorithm='auto')
+nn_model.fit(combined_features)
+
+# Example: Get recommendations for a specific book title
+book_title = "The Author's POV"
+recommendations = get_recommendations(book_title, combined_features, df)
+
+# Outputting the information
+logging.info(f"Recommendations for '{book_title}':")
+for rec in recommendations:
+    logging.info(f"{rec['title']} - Similarity Score: {rec['score']:.2f}")
