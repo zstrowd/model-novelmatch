@@ -2,8 +2,13 @@ import ast
 import pandas as pd
 import re
 import logging
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from sklearn.preprocessing import MultiLabelBinarizer, MinMaxScaler
 from sklearn.neighbors import NearestNeighbors
+
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 def extracting_data(data):
     # using the re library to separate the rating and the amound of users rated
@@ -60,8 +65,8 @@ def load_and_preprocess_data(file_path):
     df['Rating_Value'], df['Num_Ratings'] = zip(*df['Rating'].apply(extracting_data))
 
     # Handle missing or invalid ratings by filling NaN values
-    df['Rating_Value'].fillna(0, inplace=True)
-    df['Num_Ratings'].fillna(0, inplace=True)
+    df['Rating_Value'].fillna(0)
+    df['Num_Ratings'].fillna(0)
 
     return df
 
@@ -86,6 +91,22 @@ def prepare_features(df):
 
     return combined_features
 
+@app.route('/recommend', methods=['POST'])
+def recommend():
+    logging.info(f"Request received: {request.get_json()}")
+    data = request.get_json()
+    title = data.get('title')
+    top_n = data.get('top_n', 5)
+
+    if not title:
+        return jsonify({'error': 'No Title provided'}), 400
+
+    recommendations = get_recommendations(title, combined_features, df, top_n)
+
+    if 'error' in recommendations:
+        return jsonify(recommendations), 404
+
+    return jsonify(recommendations)
 
 # Preparing logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -100,11 +121,5 @@ combined_features = prepare_features(df)
 nn_model = NearestNeighbors(metric='cosine', algorithm='auto')
 nn_model.fit(combined_features)
 
-# Example: Get recommendations for a specific book title
-book_title = "The Author's POV"
-recommendations = get_recommendations(book_title, combined_features, df)
-
-# Outputting the information
-logging.info(f"Recommendations for '{book_title}':")
-for rec in recommendations:
-    logging.info(f"{rec['title']} - Similarity Score: {rec['score']:.2f}")
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
